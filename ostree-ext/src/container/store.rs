@@ -193,7 +193,7 @@ pub enum PrepareResult {
 #[derive(Debug)]
 pub struct ManifestLayerState {
     /// The underlying layer descriptor.
-    pub(crate) layer: oci_image::Descriptor,
+    pub layer: oci_image::Descriptor,
     // TODO semver: Make this readonly via an accessor
     /// The ostree ref name for this layer.
     pub ostree_ref: String,

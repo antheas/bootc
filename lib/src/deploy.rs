@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Ok;
 use anyhow::{anyhow, Context, Result};
@@ -43,6 +44,17 @@ pub(crate) struct ImageState {
     pub(crate) manifest_digest: Digest,
     pub(crate) version: Option<String>,
     pub(crate) ostree_commit: String,
+}
+
+/// Download information
+#[derive(Debug, serde::Serialize)]
+pub struct JsonProgress {
+    pub stage: String,
+    pub done_bytes: u64,
+    pub download_bytes: u64,
+    pub image_bytes: u64,
+    pub n_layers: usize,
+    pub n_layers_done: usize,
 }
 
 impl<'a> RequiredHostSpec<'a> {
@@ -142,6 +154,7 @@ async fn handle_layer_progress_print(
     mut layers: tokio::sync::mpsc::Receiver<ostree_container::store::ImportProgress>,
     mut layer_bytes: tokio::sync::watch::Receiver<Option<ostree_container::store::LayerProgress>>,
     n_layers_to_fetch: usize,
+    download_bytes: u64,
 ) {
     let start = std::time::Instant::now();
     let mut total_read = 0u64;
@@ -150,23 +163,28 @@ async fn handle_layer_progress_print(
         n_layers_to_fetch.try_into().unwrap(),
     ));
     let byte_bar = bar.add(indicatif::ProgressBar::new(0));
+    let total_byte_bar = bar.add(indicatif::ProgressBar::new(download_bytes));
     // let byte_bar = indicatif::ProgressBar::new(0);
     // byte_bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    println!("");
     layers_bar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{prefix} {bar} {pos}/{len} {wide_msg}")
+            .template("{prefix} {pos}/{len} {bar:15}")
             .unwrap(),
     );
-    layers_bar.set_prefix("Fetching layers");
+    layers_bar.set_prefix("Fetched Layers");
     layers_bar.set_message("");
-    byte_bar.set_prefix("Fetching");
     byte_bar.set_style(
         indicatif::ProgressStyle::default_bar()
-                .template(
-                    " └ {prefix} {bar} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}) {wide_msg}",
-                )
-                .unwrap()
-        );
+            .template(" └ {bar:20} {msg} ({binary_bytes}/{binary_total_bytes})")
+            .unwrap(),
+    );
+    total_byte_bar.set_prefix("Total");
+    total_byte_bar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("\n{prefix} {bar:30} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {elapsed}/{duration})")
+            .unwrap(),
+    );
     loop {
         tokio::select! {
             // Always handle layer changes first.
@@ -186,6 +204,7 @@ async fn handle_layer_progress_print(
                         byte_bar.set_position(layer_size);
                         layers_bar.inc(1);
                         total_read = total_read.saturating_add(layer_size);
+                        total_byte_bar.set_position(total_read);
                     }
                 } else {
                     // If the receiver is disconnected, then we're done
@@ -200,6 +219,7 @@ async fn handle_layer_progress_print(
                 let bytes = layer_bytes.borrow();
                 if let Some(bytes) = &*bytes {
                     byte_bar.set_position(bytes.fetched);
+                    total_byte_bar.set_position(total_read + bytes.fetched);
                 }
             }
         }
@@ -223,6 +243,68 @@ async fn handle_layer_progress_print(
     }
 }
 
+/// Write container fetch progress to standard output.
+async fn handle_layer_progress_print_jsonl(
+    mut layers: tokio::sync::mpsc::Receiver<ostree_container::store::ImportProgress>,
+    mut layer_bytes: tokio::sync::watch::Receiver<Option<ostree_container::store::LayerProgress>>,
+    n_layers_to_fetch: usize,
+    download_bytes: u64,
+    image_bytes: u64,
+    jsonw: Arc<Mutex<dyn std::io::Write + Send>>,
+) {
+    let mut total_read = 0u64;
+    let mut layers_done: usize = 0;
+    let mut last_json_written = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            // Always handle layer changes first.
+            biased;
+            layer = layers.recv() => {
+                if let Some(l) = layer {
+                    if !l.is_starting() {
+                        let layer = descriptor_of_progress(&l);
+                        layers_done += 1;
+                        total_read += total_read.saturating_add(layer.size());
+                    }
+                } else {
+                    // If the receiver is disconnected, then we're done
+                    break
+                };
+            },
+            r = layer_bytes.changed() => {
+                if r.is_err() {
+                    // If the receiver is disconnected, then we're done
+                    break
+                }
+                let bytes = layer_bytes.borrow();
+                if let Some(bytes) = &*bytes {
+                    let done_bytes = total_read + bytes.fetched;
+
+                    // Lets update the json output only on bytes fetched
+                    // They are common enough, anyhow. Debounce on time.
+                    let curr = std::time::Instant::now();
+                    if curr.duration_since(last_json_written).as_secs_f64() > 0.2 {
+                        let json = JsonProgress {
+                            stage: "fetching".to_string(),
+                            done_bytes,
+                            download_bytes,
+                            image_bytes,
+                            n_layers: n_layers_to_fetch,
+                            n_layers_done: layers_done,
+                        };
+                        let json = serde_json::to_string(&json).unwrap();
+                        if let Err(e) = writeln!(jsonw.clone().lock().unwrap(), "{}", json) {
+                            eprintln!("Failed to write JSON progress: {}", e);
+                            break;
+                        }
+                        last_json_written = curr;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Wrapper for pulling a container image, wiring up status output.
 #[context("Pulling")]
 pub(crate) async fn pull(
@@ -230,6 +312,7 @@ pub(crate) async fn pull(
     imgref: &ImageReference,
     target_imgref: Option<&OstreeImageReference>,
     quiet: bool,
+    jsonw: Option<Arc<Mutex<dyn std::io::Write + Send>>>,
 ) -> Result<Box<ImageState>> {
     let ostree_imgref = &OstreeImageReference::from(imgref.clone());
     let mut imp = new_importer(repo, ostree_imgref).await?;
@@ -250,13 +333,35 @@ pub(crate) async fn pull(
     ostree_ext::cli::print_layer_status(&prep);
     let layers_to_fetch = prep.layers_to_fetch().collect::<Result<Vec<_>>>()?;
     let n_layers_to_fetch = layers_to_fetch.len();
-    let printer = (!quiet).then(|| {
+    let download_bytes: u64 = layers_to_fetch.iter().map(|(l, _)| l.layer.size()).sum();
+    let image_bytes: u64 = prep.all_layers().map(|l| l.layer.size()).sum();
+
+    let printer = (!quiet || jsonw.is_some()).then(|| {
         let layer_progress = imp.request_progress();
         let layer_byte_progress = imp.request_layer_progress();
-        tokio::task::spawn(async move {
-            handle_layer_progress_print(layer_progress, layer_byte_progress, n_layers_to_fetch)
+        if jsonw.is_some() {
+            tokio::task::spawn(async move {
+                handle_layer_progress_print_jsonl(
+                    layer_progress,
+                    layer_byte_progress,
+                    n_layers_to_fetch,
+                    download_bytes,
+                    image_bytes,
+                    jsonw.unwrap(),
+                )
                 .await
-        })
+            })
+        } else {
+            tokio::task::spawn(async move {
+                handle_layer_progress_print(
+                    layer_progress,
+                    layer_byte_progress,
+                    n_layers_to_fetch,
+                    download_bytes,
+                )
+                .await
+            })
+        }
     });
     let import = imp.import(prep).await;
     if let Some(printer) = printer {

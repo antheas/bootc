@@ -5,8 +5,10 @@
 use std::ffi::CString;
 use std::ffi::OsString;
 use std::io::Seek;
+use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
@@ -52,6 +54,10 @@ pub(crate) struct UpgradeOpts {
     /// a userspace-only restart.
     #[clap(long, conflicts_with = "check")]
     pub(crate) apply: bool,
+
+    /// Pipe download progress to this fd in a jsonl format.
+    #[clap(long)]
+    pub(crate) json_fd: Option<i32>,
 }
 
 /// Perform an switch operation
@@ -101,6 +107,10 @@ pub(crate) struct SwitchOpts {
 
     /// Target image to use for the next boot.
     pub(crate) target: String,
+
+    /// Pipe download progress to this fd in a jsonl format.
+    #[clap(long)]
+    pub(crate) json_fd: Option<i32>,
 }
 
 /// Options controlling rollback
@@ -614,6 +624,8 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
     let (booted_deployment, _deployments, host) =
         crate::status::get_status_require_booted(sysroot)?;
     let imgref = host.spec.image.as_ref();
+    let jsonw = unwrap_fd(opts.json_fd);
+
     // If there's no specified image, let's be nice and check if the booted system is using rpm-ostree
     if imgref.is_none() {
         let booted_incompatible = host
@@ -670,7 +682,7 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
             }
         }
     } else {
-        let fetched = crate::deploy::pull(repo, imgref, None, opts.quiet).await?;
+        let fetched = crate::deploy::pull(repo, imgref, None, opts.quiet, jsonw).await?;
         let staged_digest = staged_image.map(|s| s.digest().expect("valid digest in status"));
         let fetched_digest = &fetched.manifest_digest;
         tracing::debug!("staged: {staged_digest:?}");
@@ -715,6 +727,19 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
     Ok(())
 }
 
+#[allow(unsafe_code)]
+fn unwrap_fd(fd: Option<i32>) -> Option<Arc<Mutex<dyn std::io::Write + Send>>> {
+    unsafe {
+        if !fd.is_none() {
+            return Some(Arc::new(Mutex::new(std::fs::File::from_raw_fd(
+                fd.unwrap(),
+            ))));
+        } else {
+            return None;
+        };
+    }
+}
+
 /// Implementation of the `bootc switch` CLI command.
 #[context("Switching")]
 async fn switch(opts: SwitchOpts) -> Result<()> {
@@ -729,6 +754,7 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     );
     let target = ostree_container::OstreeImageReference { sigverify, imgref };
     let target = ImageReference::from(target);
+    let jsonw = unwrap_fd(opts.json_fd);
 
     // If we're doing an in-place mutation, we shortcut most of the rest of the work here
     if opts.mutate_in_place {
@@ -764,7 +790,7 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     }
     let new_spec = RequiredHostSpec::from_spec(&new_spec)?;
 
-    let fetched = crate::deploy::pull(repo, &target, None, opts.quiet).await?;
+    let fetched = crate::deploy::pull(repo, &target, None, opts.quiet, jsonw).await?;
 
     if !opts.retain {
         // By default, we prune the previous ostree ref so it will go away after later upgrades
@@ -826,7 +852,7 @@ async fn edit(opts: EditOpts) -> Result<()> {
         return crate::deploy::rollback(sysroot).await;
     }
 
-    let fetched = crate::deploy::pull(repo, new_spec.image, None, opts.quiet).await?;
+    let fetched = crate::deploy::pull(repo, new_spec.image, None, opts.quiet, None).await?;
 
     // TODO gc old layers here
 
