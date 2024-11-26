@@ -4,7 +4,6 @@
 
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
-use std::sync::{Arc, Mutex};
 
 use anyhow::Ok;
 use anyhow::{anyhow, Context, Result};
@@ -22,6 +21,7 @@ use ostree_ext::ostree::{self, Sysroot};
 use ostree_ext::sysroot::SysrootLock;
 use ostree_ext::tokio_util::spawn_blocking_cancellable_flatten;
 
+use crate::progress_jsonl::JsonlWriter;
 use crate::spec::ImageReference;
 use crate::spec::{BootOrder, HostSpec};
 use crate::status::labels_of_config;
@@ -250,7 +250,7 @@ async fn handle_layer_progress_print_jsonl(
     n_layers_to_fetch: usize,
     download_bytes: u64,
     image_bytes: u64,
-    jsonw: Arc<Mutex<dyn std::io::Write + Send>>,
+    mut jsonw: JsonlWriter,
 ) {
     let mut total_read = 0u64;
     let mut layers_done: usize = 0;
@@ -284,7 +284,7 @@ async fn handle_layer_progress_print_jsonl(
                     // They are common enough, anyhow. Debounce on time.
                     let curr = std::time::Instant::now();
                     if curr.duration_since(last_json_written).as_secs_f64() > 0.2 {
-                        let json = JsonProgress {
+                        let progress = JsonProgress {
                             stage: "fetching".to_string(),
                             done_bytes,
                             download_bytes,
@@ -292,10 +292,9 @@ async fn handle_layer_progress_print_jsonl(
                             n_layers: n_layers_to_fetch,
                             n_layers_done: layers_done,
                         };
-                        let json = serde_json::to_string(&json).unwrap();
-                        if let Err(e) = writeln!(jsonw.clone().lock().unwrap(), "{}", json) {
-                            eprintln!("Failed to write JSON progress: {}", e);
-                            break;
+                        if let Err(e) = jsonw.send(&progress) {
+                            tracing::debug!("failed to send progress: {e}");
+                            break
                         }
                         last_json_written = curr;
                     }
@@ -312,7 +311,7 @@ pub(crate) async fn pull(
     imgref: &ImageReference,
     target_imgref: Option<&OstreeImageReference>,
     quiet: bool,
-    jsonw: Option<Arc<Mutex<dyn std::io::Write + Send>>>,
+    jsonw: Option<crate::progress_jsonl::JsonlWriter>,
 ) -> Result<Box<ImageState>> {
     let ostree_imgref = &OstreeImageReference::from(imgref.clone());
     let mut imp = new_importer(repo, ostree_imgref).await?;
@@ -339,7 +338,7 @@ pub(crate) async fn pull(
     let printer = (!quiet || jsonw.is_some()).then(|| {
         let layer_progress = imp.request_progress();
         let layer_byte_progress = imp.request_layer_progress();
-        if jsonw.is_some() {
+        if let Some(jsonw) = jsonw {
             tokio::task::spawn(async move {
                 handle_layer_progress_print_jsonl(
                     layer_progress,
@@ -347,7 +346,7 @@ pub(crate) async fn pull(
                     n_layers_to_fetch,
                     download_bytes,
                     image_bytes,
-                    jsonw.unwrap(),
+                    jsonw,
                 )
                 .await
             })
