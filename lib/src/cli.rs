@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::deploy::RequiredHostSpec;
 use crate::lints;
 use crate::progress_jsonl;
+use crate::progress_jsonl::ProgressWriter;
 use crate::spec::Host;
 use crate::spec::ImageReference;
 use crate::utils::sigpolicy_from_opts;
@@ -56,7 +57,7 @@ pub(crate) struct UpgradeOpts {
     pub(crate) apply: bool,
 
     /// Pipe download progress to this fd in a jsonl format.
-    #[clap(long)]
+    #[clap(long, conflicts_with = "quiet")]
     pub(crate) json_fd: Option<RawFd>,
 }
 
@@ -109,7 +110,7 @@ pub(crate) struct SwitchOpts {
     pub(crate) target: String,
 
     /// Pipe download progress to this fd in a jsonl format.
-    #[clap(long)]
+    #[clap(long, conflicts_with = "quiet")]
     pub(crate) json_fd: Option<RawFd>,
 }
 
@@ -624,9 +625,10 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
     let (booted_deployment, _deployments, host) =
         crate::status::get_status_require_booted(sysroot)?;
     let imgref = host.spec.image.as_ref();
-    let prog = opts
-        .json_fd
-        .map(progress_jsonl::ProgressWriter::from_raw_fd);
+    let prog = opts.json_fd.map_or_else(
+        progress_jsonl::ProgressWriter::from_empty,
+        progress_jsonl::ProgressWriter::from_raw_fd,
+    );
 
     // If there's no specified image, let's be nice and check if the booted system is using rpm-ostree
     if imgref.is_none() {
@@ -743,9 +745,10 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     );
     let target = ostree_container::OstreeImageReference { sigverify, imgref };
     let target = ImageReference::from(target);
-    let prog = opts
-        .json_fd
-        .map(progress_jsonl::ProgressWriter::from_raw_fd);
+    let prog = opts.json_fd.map_or_else(
+        progress_jsonl::ProgressWriter::from_empty,
+        progress_jsonl::ProgressWriter::from_raw_fd,
+    );
 
     // If we're doing an in-place mutation, we shortcut most of the rest of the work here
     if opts.mutate_in_place {
@@ -843,7 +846,14 @@ async fn edit(opts: EditOpts) -> Result<()> {
         return crate::deploy::rollback(sysroot).await;
     }
 
-    let fetched = crate::deploy::pull(repo, new_spec.image, None, opts.quiet, None).await?;
+    let fetched = crate::deploy::pull(
+        repo,
+        new_spec.image,
+        None,
+        opts.quiet,
+        ProgressWriter::from_empty(),
+    )
+    .await?;
 
     // TODO gc old layers here
 

@@ -142,17 +142,21 @@ fn prefix_of_progress(p: &ImportProgress) -> &'static str {
 async fn handle_layer_progress_print(
     mut layers: tokio::sync::mpsc::Receiver<ostree_container::store::ImportProgress>,
     mut layer_bytes: tokio::sync::watch::Receiver<Option<ostree_container::store::LayerProgress>>,
-    n_layers_to_fetch: usize,
-    download_bytes: u64,
+    layers_download: usize,
+    layers_total: usize,
+    bytes_download: u64,
+    bytes_total: u64,
+    mut prog: ProgressWriter,
 ) {
     let start = std::time::Instant::now();
     let mut total_read = 0u64;
     let bar = indicatif::MultiProgress::new();
     let layers_bar = bar.add(indicatif::ProgressBar::new(
-        n_layers_to_fetch.try_into().unwrap(),
+        layers_download.try_into().unwrap(),
     ));
     let byte_bar = bar.add(indicatif::ProgressBar::new(0));
-    let total_byte_bar = bar.add(indicatif::ProgressBar::new(download_bytes));
+    let total_byte_bar = bar.add(indicatif::ProgressBar::new(bytes_download));
+    let mut last_json_written = std::time::Instant::now();
     // let byte_bar = indicatif::ProgressBar::new(0);
     // byte_bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
     println!("");
@@ -207,8 +211,25 @@ async fn handle_layer_progress_print(
                 }
                 let bytes = layer_bytes.borrow();
                 if let Some(bytes) = &*bytes {
+                    let bytes_done = total_read + bytes.fetched;
                     byte_bar.set_position(bytes.fetched);
-                    total_byte_bar.set_position(total_read + bytes.fetched);
+                    total_byte_bar.set_position(bytes_done);
+
+                    // Lets update the json output only on bytes fetched
+                    // They are common enough, anyhow. Debounce on time.
+                    let curr = std::time::Instant::now();
+                    if curr.duration_since(last_json_written).as_secs_f64() > 0.2 {
+                        prog.send(ProgressStage::Fetching {
+                            bytes_done,
+                            bytes_download,
+                            bytes_total,
+                            layers_done: layers_bar.position() as usize,
+                            layers_download,
+                            layers_total,
+                            layers: None,
+                        });
+                        last_json_written = curr;
+                    }
                 }
             }
         }
@@ -232,65 +253,6 @@ async fn handle_layer_progress_print(
     }
 }
 
-/// Write container fetch progress to standard output.
-async fn handle_layer_progress_print_jsonl(
-    mut layers: tokio::sync::mpsc::Receiver<ostree_container::store::ImportProgress>,
-    mut layer_bytes: tokio::sync::watch::Receiver<Option<ostree_container::store::LayerProgress>>,
-    layers_download: usize,
-    layers_total: usize,
-    bytes_download: u64,
-    bytes_total: u64,
-    mut prog: ProgressWriter,
-) {
-    let mut total_read = 0u64;
-    let mut layers_done: usize = 0;
-    let mut last_json_written = std::time::Instant::now();
-    loop {
-        tokio::select! {
-            // Always handle layer changes first.
-            biased;
-            layer = layers.recv() => {
-                if let Some(l) = layer {
-                    if !l.is_starting() {
-                        let layer = descriptor_of_progress(&l);
-                        layers_done += 1;
-                        total_read += total_read.saturating_add(layer.size());
-                    }
-                } else {
-                    // If the receiver is disconnected, then we're done
-                    break
-                };
-            },
-            r = layer_bytes.changed() => {
-                if r.is_err() {
-                    // If the receiver is disconnected, then we're done
-                    break
-                }
-                let bytes = layer_bytes.borrow();
-                if let Some(bytes) = &*bytes {
-                    let bytes_done = total_read + bytes.fetched;
-
-                    // Lets update the json output only on bytes fetched
-                    // They are common enough, anyhow. Debounce on time.
-                    let curr = std::time::Instant::now();
-                    if curr.duration_since(last_json_written).as_secs_f64() > 0.2 {
-                        prog.send(ProgressStage::Fetching {
-                            bytes_done,
-                            bytes_download,
-                            bytes_total,
-                            layers_done,
-                            layers_download,
-                            layers_total,
-                            layers: None,
-                        });
-                        last_json_written = curr;
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Wrapper for pulling a container image, wiring up status output.
 #[context("Pulling")]
 pub(crate) async fn pull(
@@ -298,7 +260,7 @@ pub(crate) async fn pull(
     imgref: &ImageReference,
     target_imgref: Option<&OstreeImageReference>,
     quiet: bool,
-    prog: Option<ProgressWriter>,
+    prog: ProgressWriter,
 ) -> Result<Box<ImageState>> {
     let ostree_imgref = &OstreeImageReference::from(imgref.clone());
     let mut imp = new_importer(repo, ostree_imgref).await?;
@@ -323,33 +285,21 @@ pub(crate) async fn pull(
     let bytes_download: u64 = layers_to_fetch.iter().map(|(l, _)| l.layer.size()).sum();
     let bytes_total: u64 = prep.all_layers().map(|l| l.layer.size()).sum();
 
-    let printer = (!quiet || prog.is_some()).then(|| {
+    let printer = (!quiet).then(|| {
         let layer_progress = imp.request_progress();
         let layer_byte_progress = imp.request_layer_progress();
-        if let Some(prog) = prog {
-            tokio::task::spawn(async move {
-                handle_layer_progress_print_jsonl(
-                    layer_progress,
-                    layer_byte_progress,
-                    layers_download,
-                    layers_total,
-                    bytes_download,
-                    bytes_total,
-                    prog,
-                )
-                .await
-            })
-        } else {
-            tokio::task::spawn(async move {
-                handle_layer_progress_print(
-                    layer_progress,
-                    layer_byte_progress,
-                    layers_download,
-                    bytes_download,
-                )
-                .await
-            })
-        }
+        tokio::task::spawn(async move {
+            handle_layer_progress_print(
+                layer_progress,
+                layer_byte_progress,
+                layers_download,
+                layers_total,
+                bytes_download,
+                bytes_total,
+                prog,
+            )
+            .await
+        })
     });
     let import = imp.import(prep).await;
     if let Some(printer) = printer {

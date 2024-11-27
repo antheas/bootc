@@ -33,15 +33,13 @@ pub enum ProgressStage {
 }
 
 pub(crate) struct ProgressWriter {
-    fd: BufWriter<fs::File>,
-    closed: bool,
+    fd: Option<BufWriter<fs::File>>,
 }
 
 impl From<fs::File> for ProgressWriter {
     fn from(value: fs::File) -> Self {
         Self {
-            fd: BufWriter::new(value),
-            closed: false,
+            fd: Some(BufWriter::new(value)),
         }
     }
 }
@@ -53,32 +51,42 @@ impl ProgressWriter {
         unsafe { fs::File::from_raw_fd(fd) }.into()
     }
 
+    pub(crate) fn from_empty() -> Self {
+        Self { fd: None }
+    }
+
     /// Serialize the target object to JSON as a single line
     pub(crate) fn send_unchecked<T: Serialize>(&mut self, v: T) -> Result<()> {
+        if self.fd.is_none() {
+            return Ok(());
+        }
+        let mut fd = self.fd.as_mut().unwrap();
+
         // serde is guaranteed not to output newlines here
-        serde_json::to_writer(&mut self.fd, &v)?;
+        serde_json::to_writer(&mut fd, &v)?;
         // We always end in a newline
-        self.fd.write_all(b"\n")?;
+        fd.write_all(b"\n")?;
         // And flush to ensure the remote side sees updates immediately
-        self.fd.flush()?;
+        fd.flush()?;
         Ok(())
     }
 
     pub(crate) fn send<T: Serialize>(&mut self, v: T) {
-        if self.closed {
-            return;
-        }
         if let Err(e) = self.send_unchecked(v) {
             eprintln!("Failed to write to jsonl: {}", e);
             // Stop writing to fd but let process continue
-            self.closed = true;
+            self.fd = None;
         }
     }
 
     /// Flush remaining data and return the underlying file.
     #[allow(dead_code)]
     pub(crate) fn into_inner(self) -> Result<fs::File> {
-        self.fd.into_inner().map_err(Into::into)
+        if let Some(fd) = self.fd {
+            return fd.into_inner().map_err(Into::into);
+        } else {
+            return Err(anyhow::anyhow!("File descriptor closed/never existed."));
+        }
     }
 }
 
