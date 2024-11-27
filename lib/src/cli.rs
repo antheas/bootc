@@ -4,6 +4,7 @@
 
 use std::ffi::{CString, OsStr, OsString};
 use std::io::Seek;
+use std::os::fd::RawFd;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -24,6 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::deploy::RequiredHostSpec;
 use crate::lints;
+use crate::progress_jsonl;
+use crate::progress_jsonl::ProgressWriter;
 use crate::spec::Host;
 use crate::spec::ImageReference;
 use crate::utils::sigpolicy_from_opts;
@@ -51,6 +54,10 @@ pub(crate) struct UpgradeOpts {
     /// a userspace-only restart.
     #[clap(long, conflicts_with = "check")]
     pub(crate) apply: bool,
+
+    /// Pipe download progress to this fd in a jsonl format.
+    #[clap(long)]
+    pub(crate) json_fd: Option<RawFd>,
 }
 
 /// Perform an switch operation
@@ -100,6 +107,10 @@ pub(crate) struct SwitchOpts {
 
     /// Target image to use for the next boot.
     pub(crate) target: String,
+
+    /// Pipe download progress to this fd in a jsonl format.
+    #[clap(long)]
+    pub(crate) json_fd: Option<RawFd>,
 }
 
 /// Options controlling rollback
@@ -613,6 +624,12 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
     let (booted_deployment, _deployments, host) =
         crate::status::get_status_require_booted(sysroot)?;
     let imgref = host.spec.image.as_ref();
+    let prog = opts
+        .json_fd
+        .map(progress_jsonl::ProgressWriter::from_raw_fd)
+        .transpose()?
+        .unwrap_or_default();
+
     // If there's no specified image, let's be nice and check if the booted system is using rpm-ostree
     if imgref.is_none() {
         let booted_incompatible = host
@@ -669,7 +686,7 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
             }
         }
     } else {
-        let fetched = crate::deploy::pull(repo, imgref, None, opts.quiet).await?;
+        let fetched = crate::deploy::pull(repo, imgref, None, opts.quiet, prog.clone()).await?;
         let staged_digest = staged_image.map(|s| s.digest().expect("valid digest in status"));
         let fetched_digest = &fetched.manifest_digest;
         tracing::debug!("staged: {staged_digest:?}");
@@ -728,6 +745,11 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     );
     let target = ostree_container::OstreeImageReference { sigverify, imgref };
     let target = ImageReference::from(target);
+    let prog = opts
+        .json_fd
+        .map(progress_jsonl::ProgressWriter::from_raw_fd)
+        .transpose()?
+        .unwrap_or_default();
 
     // If we're doing an in-place mutation, we shortcut most of the rest of the work here
     if opts.mutate_in_place {
@@ -763,7 +785,7 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     }
     let new_spec = RequiredHostSpec::from_spec(&new_spec)?;
 
-    let fetched = crate::deploy::pull(repo, &target, None, opts.quiet).await?;
+    let fetched = crate::deploy::pull(repo, &target, None, opts.quiet, prog.clone()).await?;
 
     if !opts.retain {
         // By default, we prune the previous ostree ref so it will go away after later upgrades
@@ -819,13 +841,15 @@ async fn edit(opts: EditOpts) -> Result<()> {
     host.spec.verify_transition(&new_host.spec)?;
     let new_spec = RequiredHostSpec::from_spec(&new_host.spec)?;
 
+    let prog = ProgressWriter::default();
+
     // We only support two state transitions right now; switching the image,
     // or flipping the bootloader ordering.
     if host.spec.boot_order != new_host.spec.boot_order {
         return crate::deploy::rollback(sysroot).await;
     }
 
-    let fetched = crate::deploy::pull(repo, new_spec.image, None, opts.quiet).await?;
+    let fetched = crate::deploy::pull(repo, new_spec.image, None, opts.quiet, prog.clone()).await?;
 
     // TODO gc old layers here
 

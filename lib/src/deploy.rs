@@ -21,6 +21,7 @@ use ostree_ext::ostree::{self, Sysroot};
 use ostree_ext::sysroot::SysrootLock;
 use ostree_ext::tokio_util::spawn_blocking_cancellable_flatten;
 
+use crate::progress_jsonl::{Event, ProgressWriter};
 use crate::spec::ImageReference;
 use crate::spec::{BootOrder, HostSpec};
 use crate::status::labels_of_config;
@@ -142,10 +143,18 @@ async fn handle_layer_progress_print(
     mut layers: tokio::sync::mpsc::Receiver<ostree_container::store::ImportProgress>,
     mut layer_bytes: tokio::sync::watch::Receiver<Option<ostree_container::store::LayerProgress>>,
     n_layers_to_fetch: usize,
+    layers_total: usize,
+    bytes_to_download: u64,
+    bytes_total: u64,
+    prog: ProgressWriter,
+    quiet: bool,
 ) {
     let start = std::time::Instant::now();
     let mut total_read = 0u64;
     let bar = indicatif::MultiProgress::new();
+    if quiet {
+        bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
     let layers_bar = bar.add(indicatif::ProgressBar::new(
         n_layers_to_fetch.try_into().unwrap(),
     ));
@@ -157,7 +166,8 @@ async fn handle_layer_progress_print(
             .template("{prefix} {bar} {pos}/{len} {wide_msg}")
             .unwrap(),
     );
-    layers_bar.set_prefix("Fetching layers");
+    let taskname = "Fetching layers";
+    layers_bar.set_prefix(taskname);
     layers_bar.set_message("");
     byte_bar.set_prefix("Fetching");
     byte_bar.set_style(
@@ -167,6 +177,20 @@ async fn handle_layer_progress_print(
                 )
                 .unwrap()
         );
+
+    prog.send(Event::Begin {
+        task: taskname.into(),
+        bytes: bytes_total.checked_sub(bytes_to_download).unwrap(),
+        bytes_total,
+        steps: layers_total.checked_sub(n_layers_to_fetch).unwrap() as u64,
+        steps_total: layers_total as u64,
+    })
+    .await;
+
+    // By default we're only fetching one layer at a time. This caches
+    // the human readable description.
+    let mut current_subtask = None;
+
     loop {
         tokio::select! {
             // Always handle layer changes first.
@@ -174,18 +198,28 @@ async fn handle_layer_progress_print(
             layer = layers.recv() => {
                 if let Some(l) = layer {
                     let layer = descriptor_of_progress(&l);
+                    let layer_type = prefix_of_progress(&l);
+                    let short_digest = &layer.digest().digest()[0..21];
                     let layer_size = layer.size();
                     if l.is_starting() {
+                        // Reset the progress bar
                         byte_bar.reset_elapsed();
                         byte_bar.reset_eta();
                         byte_bar.set_length(layer_size);
-                        let layer_type = prefix_of_progress(&l);
-                        let short_digest = &layer.digest().digest()[0..21];
-                        byte_bar.set_message(format!("{layer_type} {short_digest}"));
+                        current_subtask = Some(format!("{layer_type} {short_digest}"));
+                        let current_subtask = current_subtask.as_deref().unwrap();
+                        byte_bar.set_message(current_subtask.to_string());
                     } else {
+                        // SAFETY: We must have a subtask if we get a layer completion.
+                        let current_subtask = current_subtask.as_deref().unwrap();
                         byte_bar.set_position(layer_size);
                         layers_bar.inc(1);
                         total_read = total_read.saturating_add(layer_size);
+                        // Emit an event where bytes == total to signal completion.
+                        prog.send(Event::SubTaskBytes {
+                            subtask: current_subtask.into(),
+                            bytes: layer_size,
+                            total: layer_size }).await;
                     }
                 } else {
                     // If the receiver is disconnected, then we're done
@@ -197,9 +231,19 @@ async fn handle_layer_progress_print(
                     // If the receiver is disconnected, then we're done
                     break
                 }
-                let bytes = layer_bytes.borrow();
-                if let Some(bytes) = &*bytes {
+                let current_subtask = current_subtask.as_deref().unwrap();
+                let bytes = {
+                    let bytes = layer_bytes.borrow_and_update();
+                    bytes.as_ref().cloned()
+                };
+                if let Some(bytes) = bytes {
                     byte_bar.set_position(bytes.fetched);
+                    // Byte level progress can be dropped if emitted too frequently.
+                    prog.send_lossy(Event::SubTaskBytes {
+                        subtask: current_subtask.into(),
+                        bytes: byte_bar.position(),
+                        total: byte_bar.length().unwrap(),
+                    }).await;
                 }
             }
         }
@@ -221,6 +265,7 @@ async fn handle_layer_progress_print(
     )) {
         tracing::warn!("writing to stdout: {e}");
     }
+    prog.send(Event::Complete {}).await;
 }
 
 /// Wrapper for pulling a container image, wiring up status output.
@@ -230,6 +275,7 @@ pub(crate) async fn pull(
     imgref: &ImageReference,
     target_imgref: Option<&OstreeImageReference>,
     quiet: bool,
+    prog: ProgressWriter,
 ) -> Result<Box<ImageState>> {
     let ostree_imgref = &OstreeImageReference::from(imgref.clone());
     let mut imp = new_importer(repo, ostree_imgref).await?;
@@ -250,20 +296,31 @@ pub(crate) async fn pull(
     ostree_ext::cli::print_layer_status(&prep);
     let layers_to_fetch = prep.layers_to_fetch().collect::<Result<Vec<_>>>()?;
     let n_layers_to_fetch = layers_to_fetch.len();
-    let printer = (!quiet).then(|| {
-        let layer_progress = imp.request_progress();
-        let layer_byte_progress = imp.request_layer_progress();
-        tokio::task::spawn(async move {
-            handle_layer_progress_print(layer_progress, layer_byte_progress, n_layers_to_fetch)
-                .await
-        })
+    let layers_total = prep.all_layers().count();
+    let bytes_to_fetch: u64 = layers_to_fetch.iter().map(|(l, _)| l.layer.size()).sum();
+    let bytes_total: u64 = prep.all_layers().map(|l| l.layer.size()).sum();
+
+    let prog_print = prog.clone();
+    let layer_progress = imp.request_progress();
+    let layer_byte_progress = imp.request_layer_progress();
+    let printer = tokio::task::spawn(async move {
+        handle_layer_progress_print(
+            layer_progress,
+            layer_byte_progress,
+            n_layers_to_fetch,
+            layers_total,
+            bytes_to_fetch,
+            bytes_total,
+            prog_print,
+            quiet,
+        )
+        .await
     });
     let import = imp.import(prep).await;
-    if let Some(printer) = printer {
-        let _ = printer.await;
-    }
+    let _ = printer.await;
     let import = import?;
     let wrote_imgref = target_imgref.as_ref().unwrap_or(&ostree_imgref);
+
     if let Some(msg) =
         ostree_container::store::image_filtered_content_warning(repo, &wrote_imgref.imgref)
             .context("Image content warning")?
