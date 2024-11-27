@@ -57,7 +57,7 @@ pub(crate) struct UpgradeOpts {
     pub(crate) apply: bool,
 
     /// Pipe download progress to this fd in a jsonl format.
-    #[clap(long, conflicts_with = "quiet")]
+    #[clap(long)]
     pub(crate) json_fd: Option<RawFd>,
 }
 
@@ -110,7 +110,7 @@ pub(crate) struct SwitchOpts {
     pub(crate) target: String,
 
     /// Pipe download progress to this fd in a jsonl format.
-    #[clap(long, conflicts_with = "quiet")]
+    #[clap(long)]
     pub(crate) json_fd: Option<RawFd>,
 }
 

@@ -149,6 +149,7 @@ async fn handle_layer_progress_print(
     bytes_download: u64,
     bytes_total: u64,
     prog: ProgressWriter,
+    quiet: bool,
 ) {
     if layers_download == 0 {
         // Exit early to avoid showing a frozen presentation to
@@ -193,7 +194,9 @@ async fn handle_layer_progress_print(
             .template("\n{prefix} {bar:30} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {elapsed}/{duration})")
             .unwrap(),
     );
-    bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+    if !quiet {
+        bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+    }
     loop {
         tokio::select! {
             // Always handle layer changes first.
@@ -319,26 +322,23 @@ pub(crate) async fn pull(
     let bytes_total: u64 = prep.all_layers().map(|l| l.layer.size()).sum();
 
     let prog_print = prog.clone();
-    let printer = (!quiet).then(|| {
-        let layer_progress = imp.request_progress();
-        let layer_byte_progress = imp.request_layer_progress();
-        tokio::task::spawn(async move {
-            handle_layer_progress_print(
-                layer_progress,
-                layer_byte_progress,
-                layers_download,
-                layers_total,
-                bytes_download,
-                bytes_total,
-                prog_print,
-            )
-            .await
-        })
+    let layer_progress = imp.request_progress();
+    let layer_byte_progress = imp.request_layer_progress();
+    let printer = tokio::task::spawn(async move {
+        handle_layer_progress_print(
+            layer_progress,
+            layer_byte_progress,
+            layers_download,
+            layers_total,
+            bytes_download,
+            bytes_total,
+            prog_print,
+            quiet,
+        )
+        .await
     });
     let import = imp.import(prep).await;
-    if let Some(printer) = printer {
-        let _ = printer.await;
-    }
+    let _ = printer.await;
     let import = import?;
     let wrote_imgref = target_imgref.as_ref().unwrap_or(&ostree_imgref);
 
