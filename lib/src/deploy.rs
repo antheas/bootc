@@ -284,18 +284,14 @@ async fn handle_layer_progress_print_jsonl(
                     // They are common enough, anyhow. Debounce on time.
                     let curr = std::time::Instant::now();
                     if curr.duration_since(last_json_written).as_secs_f64() > 0.2 {
-                        let progress = JsonProgress {
+                        jsonw.send(JsonProgress {
                             stage: "fetching".to_string(),
                             done_bytes,
                             download_bytes,
                             image_bytes,
                             n_layers: n_layers_to_fetch,
                             n_layers_done: layers_done,
-                        };
-                        if let Err(e) = jsonw.send(&progress) {
-                            tracing::debug!("failed to send progress: {e}");
-                            break
-                        }
+                        });
                         last_json_written = curr;
                     }
                 }

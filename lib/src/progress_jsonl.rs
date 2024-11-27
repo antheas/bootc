@@ -10,12 +10,14 @@ use serde::Serialize;
 
 pub(crate) struct JsonlWriter {
     fd: BufWriter<fs::File>,
+    closed: bool,
 }
 
 impl From<fs::File> for JsonlWriter {
     fn from(value: fs::File) -> Self {
         Self {
             fd: BufWriter::new(value),
+            closed: false,
         }
     }
 }
@@ -28,7 +30,7 @@ impl JsonlWriter {
     }
 
     /// Serialize the target object to JSON as a single line
-    pub(crate) fn send<T: Serialize>(&mut self, v: T) -> Result<()> {
+    pub(crate) fn send_unchecked<T: Serialize>(&mut self, v: T) -> Result<()> {
         // serde is guaranteed not to output newlines here
         serde_json::to_writer(&mut self.fd, &v)?;
         // We always end in a newline
@@ -36,6 +38,17 @@ impl JsonlWriter {
         // And flush to ensure the remote side sees updates immediately
         self.fd.flush()?;
         Ok(())
+    }
+
+    pub(crate) fn send<T: Serialize>(&mut self, v: T) {
+        if self.closed {
+            return;
+        }
+        if let Err(e) = self.send_unchecked(v) {
+            eprintln!("Failed to write to jsonl: {}", e);
+            // Stop writing to fd but let process continue
+            self.closed = true;
+        }
     }
 
     /// Flush remaining data and return the underlying file.
@@ -75,7 +88,7 @@ mod test {
             },
         ];
         for value in &testvalues {
-            w.send(value).unwrap();
+            w.send(value);
         }
         let mut tf = w.into_inner().unwrap();
         tf.seek(std::io::SeekFrom::Start(0))?;
