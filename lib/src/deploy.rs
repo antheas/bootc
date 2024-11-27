@@ -168,35 +168,34 @@ async fn handle_layer_progress_print(
     let start = std::time::Instant::now();
     let mut total_read = 0u64;
     let bar = indicatif::MultiProgress::new();
-    // Stage bar hidden to avoid temporary flash
-    bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-    let layers_bar = bar.add(indicatif::ProgressBar::new(
-        layers_download.try_into().unwrap(),
-    ));
-    let byte_bar = bar.add(indicatif::ProgressBar::new(0));
-    let total_byte_bar = bar.add(indicatif::ProgressBar::new(bytes_download));
-    let mut last_json_written = std::time::Instant::now();
-    layers_bar.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("{prefix} {pos}/{len} {bar:15}")
-            .unwrap(),
-    );
-    layers_bar.set_prefix("Fetched Layers");
-    layers_bar.set_message("");
-    byte_bar.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template(" └ {bar:20} {msg} ({binary_bytes}/{binary_total_bytes})")
-            .unwrap(),
-    );
-    total_byte_bar.set_prefix("Total");
-    total_byte_bar.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("\n{prefix} {bar:30} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {elapsed}/{duration})")
-            .unwrap(),
-    );
-    if !quiet {
-        bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+    if quiet {
+        bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
     }
+    let layers_bar = bar.add(
+        indicatif::ProgressBar::new(layers_download as u64)
+            .with_prefix("\nFetched Layers")
+            .with_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{prefix} {pos}/{len} {bar:15}")
+                    .unwrap(),
+            ),
+    );
+    // Force an update
+    layers_bar.set_message("");
+    let byte_bar = bar.add(
+        indicatif::ProgressBar::new(0).with_style(
+            indicatif::ProgressStyle::default_bar()
+                .template(" └ {bar:20} {msg} ({binary_bytes}/{binary_total_bytes})")
+                .unwrap(),
+        ),
+    );
+    let total_byte_bar = bar.add(indicatif::ProgressBar::new(bytes_download).with_prefix("Total").with_style(
+        indicatif::ProgressStyle::default_bar()
+        .template("\n{prefix} {bar:30} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {elapsed}/{duration})")
+        .unwrap(),
+    ));
+
+    let mut last_json_written = std::time::Instant::now();
     loop {
         tokio::select! {
             // Always handle layer changes first.
