@@ -146,7 +146,7 @@ async fn handle_layer_progress_print(
     layers_total: usize,
     bytes_download: u64,
     bytes_total: u64,
-    mut prog: ProgressWriter,
+    prog: ProgressWriter,
 ) {
     let start = std::time::Instant::now();
     let mut total_read = 0u64;
@@ -219,7 +219,7 @@ async fn handle_layer_progress_print(
                     // They are common enough, anyhow. Debounce on time.
                     let curr = std::time::Instant::now();
                     if curr.duration_since(last_json_written).as_secs_f64() > 0.2 {
-                        prog.send(ProgressStage::Fetching {
+                        prog.send(ProgressStage::Fetch {
                             bytes_done,
                             bytes_download,
                             bytes_total,
@@ -243,14 +243,12 @@ async fn handle_layer_progress_print(
     let elapsed = end.duration_since(start);
     let persec = total_read as f64 / elapsed.as_secs_f64();
     let persec = indicatif::HumanBytes(persec as u64);
-    if let Err(e) = bar.println(&format!(
+    println!(
         "Fetched layers: {} in {} ({}/s)",
         indicatif::HumanBytes(total_read),
         indicatif::HumanDuration(elapsed),
         persec,
-    )) {
-        tracing::warn!("writing to stdout: {e}");
-    }
+    );
 }
 
 /// Wrapper for pulling a container image, wiring up status output.
@@ -296,7 +294,7 @@ pub(crate) async fn pull(
                 layers_total,
                 bytes_download,
                 bytes_total,
-                prog,
+                prog.clone(),
             )
             .await
         })
@@ -493,7 +491,15 @@ pub(crate) async fn stage(
     stateroot: &str,
     image: &ImageState,
     spec: &RequiredHostSpec<'_>,
+    prog: ProgressWriter,
 ) -> Result<()> {
+    let n_steps = 3;
+
+    prog.send(ProgressStage::Deploy {
+        n_steps,
+        step: 0,
+        name: "deploying".to_string(),
+    });
     let merge_deployment = sysroot.merge_deployment(Some(stateroot));
     let origin = origin_from_imageref(spec.image)?;
     let deployment = crate::deploy::deploy(
@@ -505,8 +511,18 @@ pub(crate) async fn stage(
     )
     .await?;
 
+    prog.send(ProgressStage::Deploy {
+        n_steps,
+        step: 1,
+        name: "pulling_bound_images".to_string(),
+    });
     crate::boundimage::pull_bound_images(sysroot, &deployment).await?;
 
+    prog.send(ProgressStage::Deploy {
+        n_steps,
+        step: 2,
+        name: "cleaning_up".to_string(),
+    });
     crate::deploy::cleanup(sysroot).await?;
     println!("Queued for next boot: {:#}", spec.image);
     if let Some(version) = image.version.as_deref() {

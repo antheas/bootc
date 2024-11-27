@@ -686,7 +686,7 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
             }
         }
     } else {
-        let fetched = crate::deploy::pull(repo, imgref, None, opts.quiet, prog).await?;
+        let fetched = crate::deploy::pull(repo, imgref, None, opts.quiet, prog.clone()).await?;
         let staged_digest = staged_image.map(|s| s.digest().expect("valid digest in status"));
         let fetched_digest = &fetched.manifest_digest;
         tracing::debug!("staged: {staged_digest:?}");
@@ -709,7 +709,7 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
             println!("No update available.")
         } else {
             let osname = booted_deployment.osname();
-            crate::deploy::stage(sysroot, &osname, &fetched, &spec).await?;
+            crate::deploy::stage(sysroot, &osname, &fetched, &spec, prog.clone()).await?;
             changed = true;
             if let Some(prev) = booted_image.as_ref() {
                 if let Some(fetched_manifest) = fetched.get_manifest(repo)? {
@@ -784,7 +784,7 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     }
     let new_spec = RequiredHostSpec::from_spec(&new_spec)?;
 
-    let fetched = crate::deploy::pull(repo, &target, None, opts.quiet, prog).await?;
+    let fetched = crate::deploy::pull(repo, &target, None, opts.quiet, prog.clone()).await?;
 
     if !opts.retain {
         // By default, we prune the previous ostree ref so it will go away after later upgrades
@@ -798,7 +798,7 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     }
 
     let stateroot = booted_deployment.osname();
-    crate::deploy::stage(sysroot, &stateroot, &fetched, &new_spec).await?;
+    crate::deploy::stage(sysroot, &stateroot, &fetched, &new_spec, prog).await?;
 
     if opts.apply {
         crate::reboot::reboot()?;
@@ -840,25 +840,20 @@ async fn edit(opts: EditOpts) -> Result<()> {
     host.spec.verify_transition(&new_host.spec)?;
     let new_spec = RequiredHostSpec::from_spec(&new_host.spec)?;
 
+    let prog = ProgressWriter::from_empty();
+
     // We only support two state transitions right now; switching the image,
     // or flipping the bootloader ordering.
     if host.spec.boot_order != new_host.spec.boot_order {
         return crate::deploy::rollback(sysroot).await;
     }
 
-    let fetched = crate::deploy::pull(
-        repo,
-        new_spec.image,
-        None,
-        opts.quiet,
-        ProgressWriter::from_empty(),
-    )
-    .await?;
+    let fetched = crate::deploy::pull(repo, new_spec.image, None, opts.quiet, prog.clone()).await?;
 
     // TODO gc old layers here
 
     let stateroot = booted_deployment.osname();
-    crate::deploy::stage(sysroot, &stateroot, &fetched, &new_spec).await?;
+    crate::deploy::stage(sysroot, &stateroot, &fetched, &new_spec, prog).await?;
 
     Ok(())
 }
