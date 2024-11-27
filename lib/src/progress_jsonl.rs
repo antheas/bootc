@@ -8,12 +8,36 @@ use std::os::fd::{FromRawFd, RawFd};
 use anyhow::Result;
 use serde::Serialize;
 
-pub(crate) struct JsonlWriter {
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct LayerState {
+    pub digest: String,
+    pub downloaded: u64,
+    pub size: u64,
+    /// "cached", "waiting", "downloading", "done"
+    pub status: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "stage")]
+pub enum ProgressStage {
+    #[serde(rename = "fetching")]
+    Fetching {
+        bytes_done: u64,
+        bytes_download: u64,
+        bytes_total: u64,
+        layers_done: usize,
+        layers_download: usize,
+        layers_total: usize,
+        layers: Option<Vec<LayerState>>,
+    },
+}
+
+pub(crate) struct ProgressWriter {
     fd: BufWriter<fs::File>,
     closed: bool,
 }
 
-impl From<fs::File> for JsonlWriter {
+impl From<fs::File> for ProgressWriter {
     fn from(value: fs::File) -> Self {
         Self {
             fd: BufWriter::new(value),
@@ -22,7 +46,7 @@ impl From<fs::File> for JsonlWriter {
     }
 }
 
-impl JsonlWriter {
+impl ProgressWriter {
     /// Given a raw file descriptor, create an instance of a json-lines writer.
     #[allow(unsafe_code)]
     pub(crate) fn from_raw_fd(fd: RawFd) -> Self {
@@ -75,7 +99,7 @@ mod test {
     #[test]
     fn test_jsonl() -> Result<()> {
         let tf = tempfile::tempfile()?;
-        let mut w = JsonlWriter::from(tf);
+        let mut w = ProgressWriter::from(tf);
         let testvalues = [
             S {
                 s: "foo".into(),

@@ -624,7 +624,9 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
     let (booted_deployment, _deployments, host) =
         crate::status::get_status_require_booted(sysroot)?;
     let imgref = host.spec.image.as_ref();
-    let jsonw = opts.json_fd.map(progress_jsonl::JsonlWriter::from_raw_fd);
+    let prog = opts
+        .json_fd
+        .map(progress_jsonl::ProgressWriter::from_raw_fd);
 
     // If there's no specified image, let's be nice and check if the booted system is using rpm-ostree
     if imgref.is_none() {
@@ -682,7 +684,7 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
             }
         }
     } else {
-        let fetched = crate::deploy::pull(repo, imgref, None, opts.quiet, jsonw).await?;
+        let fetched = crate::deploy::pull(repo, imgref, None, opts.quiet, prog).await?;
         let staged_digest = staged_image.map(|s| s.digest().expect("valid digest in status"));
         let fetched_digest = &fetched.manifest_digest;
         tracing::debug!("staged: {staged_digest:?}");
@@ -741,7 +743,9 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     );
     let target = ostree_container::OstreeImageReference { sigverify, imgref };
     let target = ImageReference::from(target);
-    let jsonw = opts.json_fd.map(progress_jsonl::JsonlWriter::from_raw_fd);
+    let prog = opts
+        .json_fd
+        .map(progress_jsonl::ProgressWriter::from_raw_fd);
 
     // If we're doing an in-place mutation, we shortcut most of the rest of the work here
     if opts.mutate_in_place {
@@ -777,7 +781,7 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     }
     let new_spec = RequiredHostSpec::from_spec(&new_spec)?;
 
-    let fetched = crate::deploy::pull(repo, &target, None, opts.quiet, jsonw).await?;
+    let fetched = crate::deploy::pull(repo, &target, None, opts.quiet, prog).await?;
 
     if !opts.retain {
         // By default, we prune the previous ostree ref so it will go away after later upgrades

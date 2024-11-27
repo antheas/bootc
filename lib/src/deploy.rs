@@ -21,7 +21,7 @@ use ostree_ext::ostree::{self, Sysroot};
 use ostree_ext::sysroot::SysrootLock;
 use ostree_ext::tokio_util::spawn_blocking_cancellable_flatten;
 
-use crate::progress_jsonl::JsonlWriter;
+use crate::progress_jsonl::{ProgressStage, ProgressWriter};
 use crate::spec::ImageReference;
 use crate::spec::{BootOrder, HostSpec};
 use crate::status::labels_of_config;
@@ -44,17 +44,6 @@ pub(crate) struct ImageState {
     pub(crate) manifest_digest: Digest,
     pub(crate) version: Option<String>,
     pub(crate) ostree_commit: String,
-}
-
-/// Download information
-#[derive(Debug, serde::Serialize)]
-pub struct JsonProgress {
-    pub stage: String,
-    pub done_bytes: u64,
-    pub download_bytes: u64,
-    pub image_bytes: u64,
-    pub n_layers: usize,
-    pub n_layers_done: usize,
 }
 
 impl<'a> RequiredHostSpec<'a> {
@@ -247,10 +236,11 @@ async fn handle_layer_progress_print(
 async fn handle_layer_progress_print_jsonl(
     mut layers: tokio::sync::mpsc::Receiver<ostree_container::store::ImportProgress>,
     mut layer_bytes: tokio::sync::watch::Receiver<Option<ostree_container::store::LayerProgress>>,
-    n_layers_to_fetch: usize,
-    download_bytes: u64,
-    image_bytes: u64,
-    mut jsonw: JsonlWriter,
+    layers_download: usize,
+    layers_total: usize,
+    bytes_download: u64,
+    bytes_total: u64,
+    mut prog: ProgressWriter,
 ) {
     let mut total_read = 0u64;
     let mut layers_done: usize = 0;
@@ -278,19 +268,20 @@ async fn handle_layer_progress_print_jsonl(
                 }
                 let bytes = layer_bytes.borrow();
                 if let Some(bytes) = &*bytes {
-                    let done_bytes = total_read + bytes.fetched;
+                    let bytes_done = total_read + bytes.fetched;
 
                     // Lets update the json output only on bytes fetched
                     // They are common enough, anyhow. Debounce on time.
                     let curr = std::time::Instant::now();
                     if curr.duration_since(last_json_written).as_secs_f64() > 0.2 {
-                        jsonw.send(JsonProgress {
-                            stage: "fetching".to_string(),
-                            done_bytes,
-                            download_bytes,
-                            image_bytes,
-                            n_layers: n_layers_to_fetch,
-                            n_layers_done: layers_done,
+                        prog.send(ProgressStage::Fetching {
+                            bytes_done,
+                            bytes_download,
+                            bytes_total,
+                            layers_done,
+                            layers_download,
+                            layers_total,
+                            layers: None,
                         });
                         last_json_written = curr;
                     }
@@ -307,7 +298,7 @@ pub(crate) async fn pull(
     imgref: &ImageReference,
     target_imgref: Option<&OstreeImageReference>,
     quiet: bool,
-    jsonw: Option<crate::progress_jsonl::JsonlWriter>,
+    prog: Option<ProgressWriter>,
 ) -> Result<Box<ImageState>> {
     let ostree_imgref = &OstreeImageReference::from(imgref.clone());
     let mut imp = new_importer(repo, ostree_imgref).await?;
@@ -327,22 +318,24 @@ pub(crate) async fn pull(
     }
     ostree_ext::cli::print_layer_status(&prep);
     let layers_to_fetch = prep.layers_to_fetch().collect::<Result<Vec<_>>>()?;
-    let n_layers_to_fetch = layers_to_fetch.len();
-    let download_bytes: u64 = layers_to_fetch.iter().map(|(l, _)| l.layer.size()).sum();
-    let image_bytes: u64 = prep.all_layers().map(|l| l.layer.size()).sum();
+    let layers_download = layers_to_fetch.len();
+    let layers_total = prep.all_layers().count();
+    let bytes_download: u64 = layers_to_fetch.iter().map(|(l, _)| l.layer.size()).sum();
+    let bytes_total: u64 = prep.all_layers().map(|l| l.layer.size()).sum();
 
-    let printer = (!quiet || jsonw.is_some()).then(|| {
+    let printer = (!quiet || prog.is_some()).then(|| {
         let layer_progress = imp.request_progress();
         let layer_byte_progress = imp.request_layer_progress();
-        if let Some(jsonw) = jsonw {
+        if let Some(prog) = prog {
             tokio::task::spawn(async move {
                 handle_layer_progress_print_jsonl(
                     layer_progress,
                     layer_byte_progress,
-                    n_layers_to_fetch,
-                    download_bytes,
-                    image_bytes,
-                    jsonw,
+                    layers_download,
+                    layers_total,
+                    bytes_download,
+                    bytes_total,
+                    prog,
                 )
                 .await
             })
@@ -351,8 +344,8 @@ pub(crate) async fn pull(
                 handle_layer_progress_print(
                     layer_progress,
                     layer_byte_progress,
-                    n_layers_to_fetch,
-                    download_bytes,
+                    layers_download,
+                    bytes_download,
                 )
                 .await
             })
