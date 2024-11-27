@@ -34,6 +34,8 @@ const BASE_IMAGE_PREFIX: &str = "ostree/container/baseimage/bootc";
 /// Set on an ostree commit if this is a derived commit
 const BOOTC_DERIVED_KEY: &str = "bootc.derived";
 
+const DEPLOY_STEPS: usize = 5;
+
 /// Variant of HostSpec but required to be filled out
 pub(crate) struct RequiredHostSpec<'a> {
     pub(crate) image: &'a ImageReference,
@@ -148,18 +150,31 @@ async fn handle_layer_progress_print(
     bytes_total: u64,
     prog: ProgressWriter,
 ) {
+    if layers_download == 0 {
+        // Exit early to avoid showing a frozen presentation to
+        // the user, this only happens if the image is downloaded but
+        // has not been staged yet. This staging takes 1-2 min where
+        // nothing would be displayed otherwise.
+        println!("Committing image to OSTree");
+        prog.send(ProgressStage::Deploy {
+            n_steps: DEPLOY_STEPS,
+            step: 0,
+            name: "committing".to_string(),
+        });
+        return;
+    }
+
     let start = std::time::Instant::now();
     let mut total_read = 0u64;
     let bar = indicatif::MultiProgress::new();
+    // Stage bar hidden to avoid temporary flash
+    bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
     let layers_bar = bar.add(indicatif::ProgressBar::new(
         layers_download.try_into().unwrap(),
     ));
     let byte_bar = bar.add(indicatif::ProgressBar::new(0));
     let total_byte_bar = bar.add(indicatif::ProgressBar::new(bytes_download));
     let mut last_json_written = std::time::Instant::now();
-    // let byte_bar = indicatif::ProgressBar::new(0);
-    // byte_bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-    println!("");
     layers_bar.set_style(
         indicatif::ProgressStyle::default_bar()
             .template("{prefix} {pos}/{len} {bar:15}")
@@ -178,6 +193,7 @@ async fn handle_layer_progress_print(
             .template("\n{prefix} {bar:30} {binary_bytes}/{binary_total_bytes} ({binary_bytes_per_sec}, {elapsed}/{duration})")
             .unwrap(),
     );
+    bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
     loop {
         tokio::select! {
             // Always handle layer changes first.
@@ -198,6 +214,21 @@ async fn handle_layer_progress_print(
                         layers_bar.inc(1);
                         total_read = total_read.saturating_add(layer_size);
                         total_byte_bar.set_position(total_read);
+                        prog.send(ProgressStage::Fetch {
+                            bytes_done: total_read,
+                            bytes_download,
+                            bytes_total,
+                            layers_done: layers_bar.position() as usize,
+                            layers_download,
+                            layers_total,
+                            layers: None,
+                        });
+                        // FIXME: This is a dirty detection for the fact we are
+                        // entering the commit stage. The importer does not cleanly
+                        // expose this. Break to exit fetch progress.
+                        if layers_bar.position() as usize == layers_download {
+                            break;
+                        }
                     }
                 } else {
                     // If the receiver is disconnected, then we're done
@@ -215,8 +246,6 @@ async fn handle_layer_progress_print(
                     byte_bar.set_position(bytes.fetched);
                     total_byte_bar.set_position(bytes_done);
 
-                    // Lets update the json output only on bytes fetched
-                    // They are common enough, anyhow. Debounce on time.
                     let curr = std::time::Instant::now();
                     if curr.duration_since(last_json_written).as_secs_f64() > 0.2 {
                         prog.send(ProgressStage::Fetch {
@@ -249,6 +278,12 @@ async fn handle_layer_progress_print(
         indicatif::HumanDuration(elapsed),
         persec,
     );
+    println!("Committing image to OSTree");
+    prog.send(ProgressStage::Deploy {
+        n_steps: DEPLOY_STEPS,
+        step: 0,
+        name: "committing".to_string(),
+    });
 }
 
 /// Wrapper for pulling a container image, wiring up status output.
@@ -283,6 +318,7 @@ pub(crate) async fn pull(
     let bytes_download: u64 = layers_to_fetch.iter().map(|(l, _)| l.layer.size()).sum();
     let bytes_total: u64 = prep.all_layers().map(|l| l.layer.size()).sum();
 
+    let prog_print = prog.clone();
     let printer = (!quiet).then(|| {
         let layer_progress = imp.request_progress();
         let layer_byte_progress = imp.request_layer_progress();
@@ -294,7 +330,7 @@ pub(crate) async fn pull(
                 layers_total,
                 bytes_download,
                 bytes_total,
-                prog.clone(),
+                prog_print,
             )
             .await
         })
@@ -305,6 +341,13 @@ pub(crate) async fn pull(
     }
     let import = import?;
     let wrote_imgref = target_imgref.as_ref().unwrap_or(&ostree_imgref);
+
+    prog.send(ProgressStage::Deploy {
+        n_steps: DEPLOY_STEPS,
+        step: 1,
+        name: "sanity_check".to_string(),
+    });
+
     if let Some(msg) =
         ostree_container::store::image_filtered_content_warning(repo, &wrote_imgref.imgref)
             .context("Image content warning")?
@@ -493,11 +536,9 @@ pub(crate) async fn stage(
     spec: &RequiredHostSpec<'_>,
     prog: ProgressWriter,
 ) -> Result<()> {
-    let n_steps = 3;
-
     prog.send(ProgressStage::Deploy {
-        n_steps,
-        step: 0,
+        n_steps: DEPLOY_STEPS,
+        step: 2,
         name: "deploying".to_string(),
     });
     let merge_deployment = sysroot.merge_deployment(Some(stateroot));
@@ -512,15 +553,15 @@ pub(crate) async fn stage(
     .await?;
 
     prog.send(ProgressStage::Deploy {
-        n_steps,
-        step: 1,
+        n_steps: DEPLOY_STEPS,
+        step: 3,
         name: "pulling_bound_images".to_string(),
     });
     crate::boundimage::pull_bound_images(sysroot, &deployment).await?;
 
     prog.send(ProgressStage::Deploy {
-        n_steps,
-        step: 2,
+        n_steps: DEPLOY_STEPS,
+        step: 4,
         name: "cleaning_up".to_string(),
     });
     crate::deploy::cleanup(sysroot).await?;
