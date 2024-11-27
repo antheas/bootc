@@ -22,6 +22,14 @@ pub struct LayerState {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "stage")]
 pub enum ProgressStage {
+    #[serde(rename = "check_nochanges")]
+    CheckNoChanges { imgref: String },
+    #[serde(rename = "check_update")]
+    CheckUpdate {
+        imgref: String,
+        version: Option<String>,
+        digest: String,
+    },
     #[serde(rename = "fetch")]
     Fetch {
         bytes_done: u64,

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::deploy::RequiredHostSpec;
 use crate::lints;
 use crate::progress_jsonl;
+use crate::progress_jsonl::ProgressStage;
 use crate::progress_jsonl::ProgressWriter;
 use crate::spec::Host;
 use crate::spec::ImageReference;
@@ -669,6 +670,9 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
         match imp.prepare().await? {
             PrepareResult::AlreadyPresent(_) => {
                 println!("No changes in: {imgref:#}");
+                prog.send(ProgressStage::CheckNoChanges {
+                    imgref: imgref.to_string(),
+                });
             }
             PrepareResult::Ready(r) => {
                 crate::deploy::check_bootc_label(&r.config);
@@ -683,6 +687,11 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
                         ostree_container::ManifestDiff::new(&previous_image.manifest, &r.manifest);
                     diff.print();
                 }
+                prog.send(ProgressStage::CheckUpdate {
+                    imgref: imgref.to_string(),
+                    version: r.version().map(|s| s.into()),
+                    digest: r.manifest_digest.to_string(),
+                });
             }
         }
     } else {
