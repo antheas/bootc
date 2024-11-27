@@ -34,7 +34,7 @@ const BASE_IMAGE_PREFIX: &str = "ostree/container/baseimage/bootc";
 /// Set on an ostree commit if this is a derived commit
 const BOOTC_DERIVED_KEY: &str = "bootc.derived";
 
-const DEPLOY_STEPS: usize = 5;
+const DEPLOY_STEPS: usize = 4;
 
 /// Variant of HostSpec but required to be filled out
 pub(crate) struct RequiredHostSpec<'a> {
@@ -342,12 +342,6 @@ pub(crate) async fn pull(
     let import = import?;
     let wrote_imgref = target_imgref.as_ref().unwrap_or(&ostree_imgref);
 
-    prog.send(ProgressStage::Deploy {
-        n_steps: DEPLOY_STEPS,
-        step: 1,
-        name: "sanity_check".to_string(),
-    });
-
     if let Some(msg) =
         ostree_container::store::image_filtered_content_warning(repo, &wrote_imgref.imgref)
             .context("Image content warning")?
@@ -538,7 +532,7 @@ pub(crate) async fn stage(
 ) -> Result<()> {
     prog.send(ProgressStage::Deploy {
         n_steps: DEPLOY_STEPS,
-        step: 2,
+        step: 1,
         name: "deploying".to_string(),
     });
     let merge_deployment = sysroot.merge_deployment(Some(stateroot));
@@ -554,14 +548,14 @@ pub(crate) async fn stage(
 
     prog.send(ProgressStage::Deploy {
         n_steps: DEPLOY_STEPS,
-        step: 3,
+        step: 2,
         name: "pulling_bound_images".to_string(),
     });
     crate::boundimage::pull_bound_images(sysroot, &deployment).await?;
 
     prog.send(ProgressStage::Deploy {
         n_steps: DEPLOY_STEPS,
-        step: 4,
+        step: 3,
         name: "cleaning_up".to_string(),
     });
     crate::deploy::cleanup(sysroot).await?;
