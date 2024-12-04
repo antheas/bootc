@@ -21,7 +21,7 @@ use ostree_ext::ostree::{self, Sysroot};
 use ostree_ext::sysroot::SysrootLock;
 use ostree_ext::tokio_util::spawn_blocking_cancellable_flatten;
 
-use crate::progress_jsonl::{Event, ProgressWriter};
+use crate::progress_jsonl::{Event, ProgressWriter, SubProgressBytes};
 use crate::spec::ImageReference;
 use crate::spec::{BootOrder, HostSpec};
 use crate::status::labels_of_config;
@@ -142,6 +142,7 @@ fn prefix_of_progress(p: &ImportProgress) -> &'static str {
 async fn handle_layer_progress_print(
     mut layers: tokio::sync::mpsc::Receiver<ostree_container::store::ImportProgress>,
     mut layer_bytes: tokio::sync::watch::Receiver<Option<ostree_container::store::LayerProgress>>,
+    digest: Box<str>,
     n_layers_to_fetch: usize,
     layers_total: usize,
     bytes_to_download: u64,
@@ -178,19 +179,8 @@ async fn handle_layer_progress_print(
                 .unwrap()
         );
 
-    prog.send(Event::Begin {
-        task: taskname.into(),
-        bytes: bytes_total.checked_sub(bytes_to_download).unwrap(),
-        bytes_total,
-        steps: layers_total.checked_sub(n_layers_to_fetch).unwrap() as u64,
-        steps_total: layers_total as u64,
-    })
-    .await;
-
-    // By default we're only fetching one layer at a time. This caches
-    // the human readable description.
-    let mut current_subtask = None;
-
+    let mut subtasks = vec![];
+    let mut subtask: SubProgressBytes = Default::default();
     loop {
         tokio::select! {
             // Always handle layer changes first.
@@ -206,20 +196,36 @@ async fn handle_layer_progress_print(
                         byte_bar.reset_elapsed();
                         byte_bar.reset_eta();
                         byte_bar.set_length(layer_size);
-                        current_subtask = Some(format!("{layer_type} {short_digest}"));
-                        let current_subtask = current_subtask.as_deref().unwrap();
-                        byte_bar.set_message(current_subtask.to_string());
+                        byte_bar.set_message(format!("{layer_type} {short_digest}"));
+
+                        subtask = SubProgressBytes {
+                            subtask: layer_type.into(),
+                            description: format!("{layer_type}: ").clone().into(),
+                            id: format!("{short_digest}").clone().into(),
+                            cached_bytes: 0,
+                            bytes: 0,
+                            total: layer_size,
+                        };
                     } else {
-                        // SAFETY: We must have a subtask if we get a layer completion.
-                        let current_subtask = current_subtask.as_deref().unwrap();
                         byte_bar.set_position(layer_size);
                         layers_bar.inc(1);
                         total_read = total_read.saturating_add(layer_size);
                         // Emit an event where bytes == total to signal completion.
-                        prog.send(Event::SubTaskBytes {
-                            subtask: current_subtask.into(),
-                            bytes: layer_size,
-                            total: layer_size }).await;
+                        subtask.bytes = layer_size;
+                        subtasks.push(subtask.clone());
+                        prog.send(Event::ProgressBytes {
+                            version: 1,
+                            task: "pulling".into(),
+                            description: "Pulling Image: ".into(),
+                            id: (*digest).into(),
+                            bytes_cached: bytes_total - bytes_to_download,
+                            bytes: total_read,
+                            bytes_total: bytes_to_download,
+                            steps_cached: (layers_total - n_layers_to_fetch) as u64,
+                            steps: layers_bar.position(),
+                            steps_total: n_layers_to_fetch as u64,
+                            subtasks: subtasks.clone(),
+                        }).await;
                     }
                 } else {
                     // If the receiver is disconnected, then we're done
@@ -231,18 +237,25 @@ async fn handle_layer_progress_print(
                     // If the receiver is disconnected, then we're done
                     break
                 }
-                let current_subtask = current_subtask.as_deref().unwrap();
                 let bytes = {
                     let bytes = layer_bytes.borrow_and_update();
                     bytes.as_ref().cloned()
                 };
                 if let Some(bytes) = bytes {
                     byte_bar.set_position(bytes.fetched);
-                    // Byte level progress can be dropped if emitted too frequently.
-                    prog.send_lossy(Event::SubTaskBytes {
-                        subtask: current_subtask.into(),
-                        bytes: byte_bar.position(),
-                        total: byte_bar.length().unwrap(),
+                    subtask.bytes = byte_bar.position();
+                    prog.send(Event::ProgressBytes {
+                        version: 1,
+                        task: "pulling".into(),
+                        description: "Pulling Image: ".into(),
+                        id: (*digest).into(),
+                        bytes_cached: bytes_total - bytes_to_download,
+                        bytes: total_read + byte_bar.position(),
+                        bytes_total: bytes_to_download,
+                        steps_cached: (layers_total - n_layers_to_fetch) as u64,
+                        steps: layers_bar.position(),
+                        steps_total: n_layers_to_fetch as u64,
+                        subtasks: subtasks.clone().into_iter().chain([subtask.clone()]).collect(),
                     }).await;
                 }
             }
@@ -265,7 +278,6 @@ async fn handle_layer_progress_print(
     )) {
         tracing::warn!("writing to stdout: {e}");
     }
-    prog.send(Event::Complete {}).await;
 }
 
 /// Wrapper for pulling a container image, wiring up status output.
@@ -301,12 +313,14 @@ pub(crate) async fn pull(
     let bytes_total: u64 = prep.all_layers().map(|l| l.layer.size()).sum();
 
     let prog_print = prog.clone();
+    let digest = prep.manifest_digest.clone();
     let layer_progress = imp.request_progress();
     let layer_byte_progress = imp.request_layer_progress();
     let printer = tokio::task::spawn(async move {
         handle_layer_progress_print(
             layer_progress,
             layer_byte_progress,
+            digest.as_ref().into(),
             n_layers_to_fetch,
             layers_total,
             bytes_to_fetch,

@@ -1,14 +1,13 @@
 //! Output progress data using the json-lines format. For more information
 //! see <https://jsonlines.org/>.
 
+use anyhow::Result;
+use fn_error_context::context;
+use serde::Serialize;
 use std::borrow::Cow;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::time::Instant;
-
-use anyhow::Result;
-use fn_error_context::context;
-use serde::Serialize;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::unix::pipe::Sender;
 use tokio::sync::Mutex;
@@ -16,37 +15,64 @@ use tokio::sync::Mutex;
 // Maximum number of times per second that an event will be written.
 const REFRESH_HZ: u16 = 5;
 
+/// An incremental update to e.g. a container image layer download.
+/// The first time a given "subtask" name is seen, a new progress bar should be created.
+/// If bytes == bytes_total, then the subtask is considered complete.
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default, Clone)]
+pub struct SubProgressBytes<'t> {
+    /// A machine readable type for the task (used for i18n).
+    /// (e.g., "ostree_chunk", "ostree_derived")
+    #[serde(borrow)]
+    pub subtask: Cow<'t, str>,
+    /// A human readable description of the task if i18n is not available.
+    /// (e.g., "OSTree Chunk:", "Derived Layer:")
+    #[serde(borrow)]
+    pub description: Cow<'t, str>,
+    /// A human and machine readable identifier for the task
+    /// (e.g., ostree chunk/layer hash).
+    #[serde(borrow)]
+    pub id: Cow<'t, str>,
+    /// The number of bytes fetched by a previous run (e.g., zstd_chunked).
+    pub cached_bytes: u64,
+    /// Updated byte level progress
+    pub bytes: u64,
+    /// Total number of bytes
+    pub total: u64,
+}
+
 /// An event emitted as JSON.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Event<'t> {
     /// An incremental update to a container image layer download
-    Begin {
-        /// A short description of the overall operation
+    ProgressBytes {
+        /// The version of the progress event format. Currently 1.
+        version: u32,
+        /// A machine readable type (e.g., pulling) for the task (used for i18n
+        /// and UI customization).
         #[serde(borrow)]
         task: Cow<'t, str>,
+        /// A human readable description of the task if i18n is not available.
+        #[serde(borrow)]
+        description: Cow<'t, str>,
+        /// A human and machine readable identifier for the task (e.g., the image name).
+        #[serde(borrow)]
+        id: Cow<'t, str>,
+        /// The number of bytes fetched by a previous run.
+        bytes_cached: u64,
         /// The number of bytes already fetched.
         bytes: u64,
         /// Total number of bytes. If zero, then this should be considered "unspecified".
         bytes_total: u64,
+        /// The number of steps fetched by a previous run.
+        steps_cached: u64,
         /// The initial position of progress.
         steps: u64,
         /// The total number of steps (e.g. container image layers, RPMs)
         steps_total: u64,
+        /// The currently running subtasks.
+        subtasks: Vec<SubProgressBytes<'t>>,
     },
-    /// An incremental update to e.g. a container image layer download.
-    /// The first time a given "subtask" name is seen, a new progress bar should be created.
-    /// If bytes == bytes_total, then the subtask is considered complete.
-    SubTaskBytes {
-        #[serde(borrow)]
-        subtask: Cow<'t, str>,
-        /// Updated byte level progress
-        bytes: u64,
-        /// Total number of bytes
-        total: u64,
-    },
-    /// The operation has completed.
-    Complete {},
 }
 
 #[derive(Debug)]
@@ -124,16 +150,6 @@ impl ProgressWriter {
 
     /// Send an event.
     pub(crate) async fn send<T: Serialize>(&self, v: T) {
-        if let Err(e) = self.send_impl(v, true).await {
-            eprintln!("Failed to write to jsonl: {}", e);
-            // Stop writing to fd but let process continue
-            // SAFETY: Propagating panics from the mutex here is intentional
-            let _ = self.inner.lock().await.take();
-        }
-    }
-
-    /// Send an event that can be dropped.
-    pub(crate) async fn send_lossy<T: Serialize>(&self, v: T) {
         if let Err(e) = self.send_impl(v, false).await {
             eprintln!("Failed to write to jsonl: {}", e);
             // Stop writing to fd but let process continue
