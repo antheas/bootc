@@ -593,7 +593,7 @@ pub(crate) async fn stage(
     subtask.id = "deploying".into();
     subtask.description = "Deploying Image".into();
     subtask.completed = false;
-    prog.send_lossy(Event::ProgressSteps {
+    prog.send(Event::ProgressSteps {
         version: 1,
         task: "staging".into(),
         description: "Deploying Image".into(),
@@ -624,7 +624,7 @@ pub(crate) async fn stage(
     subtask.id = "bound_images".into();
     subtask.description = "Pulling Bound Images".into();
     subtask.completed = false;
-    prog.send_lossy(Event::ProgressSteps {
+    prog.send(Event::ProgressSteps {
         version: 1,
         task: "staging".into(),
         description: "Deploying Image".into(),
@@ -647,7 +647,7 @@ pub(crate) async fn stage(
     subtask.id = "cleanup".into();
     subtask.description = "Removing old images".into();
     subtask.completed = false;
-    prog.send_lossy(Event::ProgressSteps {
+    prog.send(Event::ProgressSteps {
         version: 1,
         task: "staging".into(),
         description: "Deploying Image".into(),
