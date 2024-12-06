@@ -15,10 +15,13 @@ use tokio::sync::Mutex;
 // Maximum number of times per second that an event will be written.
 const REFRESH_HZ: u16 = 5;
 
+pub const API_VERSION: &str = "org.containers.bootc.progress/v1";
+
 /// An incremental update to e.g. a container image layer download.
 /// The first time a given "subtask" name is seen, a new progress bar should be created.
 /// If bytes == bytes_total, then the subtask is considered complete.
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct SubTaskBytes<'t> {
     /// A machine readable type for the task (used for i18n).
     /// (e.g., "ostree_chunk", "ostree_derived")
@@ -42,6 +45,7 @@ pub struct SubTaskBytes<'t> {
 
 /// Marks the beginning and end of a dictrete step
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct SubTaskStep<'t> {
     /// A machine readable type for the task (used for i18n).
     /// (e.g., "ostree_chunk", "ostree_derived")
@@ -61,12 +65,13 @@ pub struct SubTaskStep<'t> {
 
 /// An event emitted as JSON.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum Event<'t> {
     /// An incremental update to a container image layer download
     ProgressBytes {
-        /// The version of the progress event format. Currently 1.
-        version: u32,
+        /// The version of the progress event format.
+        #[serde(borrow)]
+        api_version: Cow<'t, str>,
         /// A machine readable type (e.g., pulling) for the task (used for i18n
         /// and UI customization).
         #[serde(borrow)]
@@ -96,8 +101,9 @@ pub enum Event<'t> {
     },
     /// An incremental update with discrete steps
     ProgressSteps {
-        /// The version of the progress event format. Currently 1.
-        version: u32,
+        /// The version of the progress event format.
+        #[serde(borrow)]
+        api_version: Cow<'t, str>,
         /// A machine readable type (e.g., pulling) for the task (used for i18n
         /// and UI customization).
         #[serde(borrow)]

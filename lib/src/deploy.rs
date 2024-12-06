@@ -21,7 +21,7 @@ use ostree_ext::ostree::{self, Sysroot};
 use ostree_ext::sysroot::SysrootLock;
 use ostree_ext::tokio_util::spawn_blocking_cancellable_flatten;
 
-use crate::progress_jsonl::{Event, ProgressWriter, SubTaskBytes, SubTaskStep};
+use crate::progress_jsonl::{Event, ProgressWriter, SubTaskBytes, SubTaskStep, API_VERSION};
 use crate::spec::ImageReference;
 use crate::spec::{BootOrder, HostSpec};
 use crate::status::labels_of_config;
@@ -214,7 +214,7 @@ async fn handle_layer_progress_print(
                         subtask.bytes = layer_size;
                         subtasks.push(subtask.clone());
                         prog.send(Event::ProgressBytes {
-                            version: 1,
+                            api_version: API_VERSION.into(),
                             task: "pulling".into(),
                             description: format!("Pulling Image: {digest}").into(),
                             id: (*digest).into(),
@@ -245,7 +245,7 @@ async fn handle_layer_progress_print(
                     byte_bar.set_position(bytes.fetched);
                     subtask.bytes = byte_bar.position();
                     prog.send_lossy(Event::ProgressBytes {
-                        version: 1,
+                        api_version: API_VERSION.into(),
                         task: "pulling".into(),
                         description: format!("Pulling Image: {digest}").into(),
                         id: (*digest).into(),
@@ -283,7 +283,7 @@ async fn handle_layer_progress_print(
     // use as a heuristic to begin import progress
     // Cannot be lossy or it is dropped
     prog.send(Event::ProgressSteps {
-        version: 1,
+        api_version: API_VERSION.into(),
         task: "importing".into(),
         description: "Importing Image".into(),
         id: (*digest).into(),
@@ -356,7 +356,7 @@ pub(crate) async fn pull(
     let _ = printer.await;
     // Both the progress and the import are done, so import is done as well
     prog.send(Event::ProgressSteps {
-        version: 1,
+        api_version: API_VERSION.into(),
         task: "importing".into(),
         description: "Importing Image".into(),
         id: digest_imp.clone().as_ref().into(),
@@ -571,7 +571,7 @@ pub(crate) async fn stage(
     };
     let mut subtasks = vec![];
     prog.send(Event::ProgressSteps {
-        version: 1,
+        api_version: API_VERSION.into(),
         task: "staging".into(),
         description: "Deploying Image".into(),
         id: image.manifest_digest.clone().as_ref().into(),
@@ -594,7 +594,7 @@ pub(crate) async fn stage(
     subtask.description = "Deploying Image".into();
     subtask.completed = false;
     prog.send(Event::ProgressSteps {
-        version: 1,
+        api_version: API_VERSION.into(),
         task: "staging".into(),
         description: "Deploying Image".into(),
         id: image.manifest_digest.clone().as_ref().into(),
@@ -625,7 +625,7 @@ pub(crate) async fn stage(
     subtask.description = "Pulling Bound Images".into();
     subtask.completed = false;
     prog.send(Event::ProgressSteps {
-        version: 1,
+        api_version: API_VERSION.into(),
         task: "staging".into(),
         description: "Deploying Image".into(),
         id: image.manifest_digest.clone().as_ref().into(),
@@ -648,7 +648,7 @@ pub(crate) async fn stage(
     subtask.description = "Removing old images".into();
     subtask.completed = false;
     prog.send(Event::ProgressSteps {
-        version: 1,
+        api_version: API_VERSION.into(),
         task: "staging".into(),
         description: "Deploying Image".into(),
         id: image.manifest_digest.clone().as_ref().into(),
@@ -672,7 +672,7 @@ pub(crate) async fn stage(
     subtask.completed = true;
     subtasks.push(subtask.clone());
     prog.send(Event::ProgressSteps {
-        version: 1,
+        api_version: API_VERSION.into(),
         task: "staging".into(),
         description: "Deploying Image".into(),
         id: image.manifest_digest.clone().as_ref().into(),
