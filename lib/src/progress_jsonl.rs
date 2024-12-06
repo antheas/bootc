@@ -65,7 +65,7 @@ pub struct SubTaskStep<'t> {
 
 /// An event emitted as JSON.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum Event<'t> {
     /// An incremental update to a container image layer download
     #[serde(rename_all = "camelCase")]
