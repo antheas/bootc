@@ -278,6 +278,27 @@ async fn handle_layer_progress_print(
     )) {
         tracing::warn!("writing to stdout: {e}");
     }
+
+    // Since the progress notifier closed, we know import has started
+    // use as a heuristic to begin import progress
+    // Cannot be lossy or it is dropped
+    prog.send(Event::ProgressSteps {
+        version: 1,
+        task: "importing".into(),
+        description: "Importing Image".into(),
+        id: (*digest).into(),
+        steps_cached: 0,
+        steps: 0,
+        steps_total: 3,
+        subtasks: [SubTaskStep {
+            subtask: "importing".into(),
+            description: "Importing Image".into(),
+            id: "importing".into(),
+            completed: false,
+        }]
+        .into(),
+    })
+    .await;
 }
 
 /// Wrapper for pulling a container image, wiring up status output.
@@ -314,6 +335,7 @@ pub(crate) async fn pull(
 
     let prog_print = prog.clone();
     let digest = prep.manifest_digest.clone();
+    let digest_imp = prep.manifest_digest.clone();
     let layer_progress = imp.request_progress();
     let layer_byte_progress = imp.request_layer_progress();
     let printer = tokio::task::spawn(async move {
@@ -332,6 +354,24 @@ pub(crate) async fn pull(
     });
     let import = imp.import(prep).await;
     let _ = printer.await;
+    // Both the progress and the import are done, so import is done as well
+    prog.send(Event::ProgressSteps {
+        version: 1,
+        task: "importing".into(),
+        description: "Importing Image".into(),
+        id: digest_imp.clone().as_ref().into(),
+        steps_cached: 0,
+        steps: 1,
+        steps_total: 1,
+        subtasks: [SubTaskStep {
+            subtask: "importing".into(),
+            description: "Importing Image".into(),
+            id: "importing".into(),
+            completed: true,
+        }]
+        .into(),
+    })
+    .await;
     let import = import?;
     let wrote_imgref = target_imgref.as_ref().unwrap_or(&ostree_imgref);
 
@@ -525,15 +565,15 @@ pub(crate) async fn stage(
 ) -> Result<()> {
     let mut subtask = SubTaskStep {
         subtask: "merging".into(),
-        description: "Merging Image...".into(),
+        description: "Merging Image".into(),
         id: "fetching".into(),
         completed: false,
     };
     let mut subtasks = vec![];
-    prog.send_lossy(Event::ProgressSteps {
+    prog.send(Event::ProgressSteps {
         version: 1,
         task: "staging".into(),
-        description: "Deploying Image...".into(),
+        description: "Deploying Image".into(),
         id: image.manifest_digest.clone().as_ref().into(),
         steps_cached: 0,
         steps: 0,
