@@ -21,7 +21,7 @@ use ostree_ext::ostree::{self, Sysroot};
 use ostree_ext::sysroot::SysrootLock;
 use ostree_ext::tokio_util::spawn_blocking_cancellable_flatten;
 
-use crate::progress_jsonl::{Event, ProgressWriter, SubProgressBytes};
+use crate::progress_jsonl::{Event, ProgressWriter, SubTaskBytes, SubTaskStep};
 use crate::spec::ImageReference;
 use crate::spec::{BootOrder, HostSpec};
 use crate::status::labels_of_config;
@@ -180,7 +180,7 @@ async fn handle_layer_progress_print(
         );
 
     let mut subtasks = vec![];
-    let mut subtask: SubProgressBytes = Default::default();
+    let mut subtask: SubTaskBytes = Default::default();
     loop {
         tokio::select! {
             // Always handle layer changes first.
@@ -198,9 +198,9 @@ async fn handle_layer_progress_print(
                         byte_bar.set_length(layer_size);
                         byte_bar.set_message(format!("{layer_type} {short_digest}"));
 
-                        subtask = SubProgressBytes {
+                        subtask = SubTaskBytes {
                             subtask: layer_type.into(),
-                            description: format!("{layer_type}: ").clone().into(),
+                            description: format!("{layer_type}: {short_digest}").clone().into(),
                             id: format!("{short_digest}").clone().into(),
                             cached_bytes: 0,
                             bytes: 0,
@@ -216,7 +216,7 @@ async fn handle_layer_progress_print(
                         prog.send(Event::ProgressBytes {
                             version: 1,
                             task: "pulling".into(),
-                            description: "Pulling Image: ".into(),
+                            description: format!("Pulling Image: {digest}").into(),
                             id: (*digest).into(),
                             bytes_cached: bytes_total - bytes_to_download,
                             bytes: total_read,
@@ -247,7 +247,7 @@ async fn handle_layer_progress_print(
                     prog.send_lossy(Event::ProgressBytes {
                         version: 1,
                         task: "pulling".into(),
-                        description: "Pulling Image: ".into(),
+                        description: format!("Pulling Image: {digest}").into(),
                         id: (*digest).into(),
                         bytes_cached: bytes_total - bytes_to_download,
                         bytes: total_read + byte_bar.position(),
@@ -521,8 +521,53 @@ pub(crate) async fn stage(
     stateroot: &str,
     image: &ImageState,
     spec: &RequiredHostSpec<'_>,
+    prog: ProgressWriter,
 ) -> Result<()> {
+    let mut subtask = SubTaskStep {
+        subtask: "merging".into(),
+        description: "Merging Image...".into(),
+        id: "fetching".into(),
+        completed: false,
+    };
+    let mut subtasks = vec![];
+    prog.send_lossy(Event::ProgressSteps {
+        version: 1,
+        task: "staging".into(),
+        description: "Deploying Image...".into(),
+        id: image.manifest_digest.clone().as_ref().into(),
+        steps_cached: 0,
+        steps: 0,
+        steps_total: 3,
+        subtasks: subtasks
+            .clone()
+            .into_iter()
+            .chain([subtask.clone()])
+            .collect(),
+    })
+    .await;
     let merge_deployment = sysroot.merge_deployment(Some(stateroot));
+
+    subtask.completed = true;
+    subtasks.push(subtask.clone());
+    subtask.subtask = "deploying".into();
+    subtask.id = "deploying".into();
+    subtask.description = "Deploying Image".into();
+    subtask.completed = false;
+    prog.send_lossy(Event::ProgressSteps {
+        version: 1,
+        task: "staging".into(),
+        description: "Deploying Image".into(),
+        id: image.manifest_digest.clone().as_ref().into(),
+        steps_cached: 0,
+        steps: 1,
+        steps_total: 3,
+        subtasks: subtasks
+            .clone()
+            .into_iter()
+            .chain([subtask.clone()])
+            .collect(),
+    })
+    .await;
     let origin = origin_from_imageref(spec.image)?;
     let deployment = crate::deploy::deploy(
         sysroot,
@@ -533,14 +578,74 @@ pub(crate) async fn stage(
     )
     .await?;
 
+    subtask.completed = true;
+    subtasks.push(subtask.clone());
+    subtask.subtask = "bound_images".into();
+    subtask.id = "bound_images".into();
+    subtask.description = "Pulling Bound Images".into();
+    subtask.completed = false;
+    prog.send_lossy(Event::ProgressSteps {
+        version: 1,
+        task: "staging".into(),
+        description: "Deploying Image".into(),
+        id: image.manifest_digest.clone().as_ref().into(),
+        steps_cached: 0,
+        steps: 1,
+        steps_total: 3,
+        subtasks: subtasks
+            .clone()
+            .into_iter()
+            .chain([subtask.clone()])
+            .collect(),
+    })
+    .await;
     crate::boundimage::pull_bound_images(sysroot, &deployment).await?;
 
+    subtask.completed = true;
+    subtasks.push(subtask.clone());
+    subtask.subtask = "cleanup".into();
+    subtask.id = "cleanup".into();
+    subtask.description = "Removing old images".into();
+    subtask.completed = false;
+    prog.send_lossy(Event::ProgressSteps {
+        version: 1,
+        task: "staging".into(),
+        description: "Deploying Image".into(),
+        id: image.manifest_digest.clone().as_ref().into(),
+        steps_cached: 0,
+        steps: 2,
+        steps_total: 3,
+        subtasks: subtasks
+            .clone()
+            .into_iter()
+            .chain([subtask.clone()])
+            .collect(),
+    })
+    .await;
     crate::deploy::cleanup(sysroot).await?;
     println!("Queued for next boot: {:#}", spec.image);
     if let Some(version) = image.version.as_deref() {
         println!("  Version: {version}");
     }
     println!("  Digest: {}", image.manifest_digest);
+
+    subtask.completed = true;
+    subtasks.push(subtask.clone());
+    prog.send(Event::ProgressSteps {
+        version: 1,
+        task: "staging".into(),
+        description: "Deploying Image".into(),
+        id: image.manifest_digest.clone().as_ref().into(),
+        steps_cached: 0,
+        steps: 3,
+        steps_total: 3,
+        subtasks: subtasks
+            .clone()
+            .into_iter()
+            .chain([subtask.clone()])
+            .collect(),
+    })
+    .await;
 
     Ok(())
 }

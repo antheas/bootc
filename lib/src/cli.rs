@@ -709,7 +709,7 @@ async fn upgrade(opts: UpgradeOpts) -> Result<()> {
             println!("No update available.")
         } else {
             let osname = booted_deployment.osname();
-            crate::deploy::stage(sysroot, &osname, &fetched, &spec).await?;
+            crate::deploy::stage(sysroot, &osname, &fetched, &spec, prog.clone()).await?;
             changed = true;
             if let Some(prev) = booted_image.as_ref() {
                 if let Some(fetched_manifest) = fetched.get_manifest(repo)? {
@@ -799,7 +799,7 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
     }
 
     let stateroot = booted_deployment.osname();
-    crate::deploy::stage(sysroot, &stateroot, &fetched, &new_spec).await?;
+    crate::deploy::stage(sysroot, &stateroot, &fetched, &new_spec, prog.clone()).await?;
 
     if opts.apply {
         crate::reboot::reboot()?;
@@ -854,7 +854,7 @@ async fn edit(opts: EditOpts) -> Result<()> {
     // TODO gc old layers here
 
     let stateroot = booted_deployment.osname();
-    crate::deploy::stage(sysroot, &stateroot, &fetched, &new_spec).await?;
+    crate::deploy::stage(sysroot, &stateroot, &fetched, &new_spec, prog.clone()).await?;
 
     Ok(())
 }

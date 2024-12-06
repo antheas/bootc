@@ -19,7 +19,7 @@ const REFRESH_HZ: u16 = 5;
 /// The first time a given "subtask" name is seen, a new progress bar should be created.
 /// If bytes == bytes_total, then the subtask is considered complete.
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default, Clone)]
-pub struct SubProgressBytes<'t> {
+pub struct SubTaskBytes<'t> {
     /// A machine readable type for the task (used for i18n).
     /// (e.g., "ostree_chunk", "ostree_derived")
     #[serde(borrow)]
@@ -40,6 +40,25 @@ pub struct SubProgressBytes<'t> {
     pub total: u64,
 }
 
+/// Marks the beginning and end of a dictrete step
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default, Clone)]
+pub struct SubTaskStep<'t> {
+    /// A machine readable type for the task (used for i18n).
+    /// (e.g., "ostree_chunk", "ostree_derived")
+    #[serde(borrow)]
+    pub subtask: Cow<'t, str>,
+    /// A human readable description of the task if i18n is not available.
+    /// (e.g., "OSTree Chunk:", "Derived Layer:")
+    #[serde(borrow)]
+    pub description: Cow<'t, str>,
+    /// A human and machine readable identifier for the task
+    /// (e.g., ostree chunk/layer hash).
+    #[serde(borrow)]
+    pub id: Cow<'t, str>,
+    /// Starts as false when beginning to execute and turns true when completed.
+    pub completed: bool,
+}
+
 /// An event emitted as JSON.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -55,7 +74,9 @@ pub enum Event<'t> {
         /// A human readable description of the task if i18n is not available.
         #[serde(borrow)]
         description: Cow<'t, str>,
-        /// A human and machine readable identifier for the task (e.g., the image name).
+        /// A human and machine readable unique identifier for the task
+        /// (e.g., the image name). For tasks that only happen once,
+        /// it can be set to the same value as task.
         #[serde(borrow)]
         id: Cow<'t, str>,
         /// The number of bytes fetched by a previous run.
@@ -71,7 +92,32 @@ pub enum Event<'t> {
         /// The total number of steps (e.g. container image layers, RPMs)
         steps_total: u64,
         /// The currently running subtasks.
-        subtasks: Vec<SubProgressBytes<'t>>,
+        subtasks: Vec<SubTaskBytes<'t>>,
+    },
+    /// An incremental update with discrete steps
+    ProgressSteps {
+        /// The version of the progress event format. Currently 1.
+        version: u32,
+        /// A machine readable type (e.g., pulling) for the task (used for i18n
+        /// and UI customization).
+        #[serde(borrow)]
+        task: Cow<'t, str>,
+        /// A human readable description of the task if i18n is not available.
+        #[serde(borrow)]
+        description: Cow<'t, str>,
+        /// A human and machine readable unique identifier for the task
+        /// (e.g., the image name). For tasks that only happen once,
+        /// it can be set to the same value as task.
+        #[serde(borrow)]
+        id: Cow<'t, str>,
+        /// The number of steps fetched by a previous run.
+        steps_cached: u64,
+        /// The initial position of progress.
+        steps: u64,
+        /// The total number of steps (e.g. container image layers, RPMs)
+        steps_total: u64,
+        /// The currently running subtasks.
+        subtasks: Vec<SubTaskStep<'t>>,
     },
 }
 
