@@ -202,9 +202,9 @@ async fn handle_layer_progress_print(
                             subtask: layer_type.into(),
                             description: format!("{layer_type}: {short_digest}").clone().into(),
                             id: format!("{short_digest}").clone().into(),
-                            cached_bytes: 0,
+                            bytes_cached: 0,
                             bytes: 0,
-                            total: layer_size,
+                            bytes_total: layer_size,
                         };
                     } else {
                         byte_bar.set_position(layer_size);

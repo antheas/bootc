@@ -36,11 +36,11 @@ pub struct SubTaskBytes<'t> {
     #[serde(borrow)]
     pub id: Cow<'t, str>,
     /// The number of bytes fetched by a previous run (e.g., zstd_chunked).
-    pub cached_bytes: u64,
+    pub bytes_cached: u64,
     /// Updated byte level progress
     pub bytes: u64,
     /// Total number of bytes
-    pub total: u64,
+    pub bytes_total: u64,
 }
 
 /// Marks the beginning and end of a dictrete step
