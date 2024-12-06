@@ -289,7 +289,7 @@ async fn handle_layer_progress_print(
         id: (*digest).into(),
         steps_cached: 0,
         steps: 0,
-        steps_total: 3,
+        steps_total: 1,
         subtasks: [SubTaskStep {
             subtask: "importing".into(),
             description: "Importing Image".into(),
