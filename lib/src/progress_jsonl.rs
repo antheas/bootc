@@ -150,6 +150,16 @@ impl ProgressWriter {
 
     /// Send an event.
     pub(crate) async fn send<T: Serialize>(&self, v: T) {
+        if let Err(e) = self.send_impl(v, true).await {
+            eprintln!("Failed to write to jsonl: {}", e);
+            // Stop writing to fd but let process continue
+            // SAFETY: Propagating panics from the mutex here is intentional
+            let _ = self.inner.lock().await.take();
+        }
+    }
+
+    /// Send an event that can be dropped.
+    pub(crate) async fn send_lossy<T: Serialize>(&self, v: T) {
         if let Err(e) = self.send_impl(v, false).await {
             eprintln!("Failed to write to jsonl: {}", e);
             // Stop writing to fd but let process continue

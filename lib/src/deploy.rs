@@ -244,7 +244,7 @@ async fn handle_layer_progress_print(
                 if let Some(bytes) = bytes {
                     byte_bar.set_position(bytes.fetched);
                     subtask.bytes = byte_bar.position();
-                    prog.send(Event::ProgressBytes {
+                    prog.send_lossy(Event::ProgressBytes {
                         version: 1,
                         task: "pulling".into(),
                         description: "Pulling Image: ".into(),
