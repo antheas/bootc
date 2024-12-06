@@ -65,10 +65,13 @@ pub struct SubTaskStep<'t> {
 
 /// An event emitted as JSON.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "PascalCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Event<'t> {
     /// An incremental update to a container image layer download
-    #[serde(rename_all = "camelCase")]
     ProgressBytes {
         /// The version of the progress event format.
         #[serde(borrow)]
@@ -101,7 +104,6 @@ pub enum Event<'t> {
         subtasks: Vec<SubTaskBytes<'t>>,
     },
     /// An incremental update with discrete steps
-    #[serde(rename_all = "camelCase")]
     ProgressSteps {
         /// The version of the progress event format.
         #[serde(borrow)]
